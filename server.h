@@ -43,6 +43,9 @@ private:
         std::mutex m;
         std::queue<std::string> client_requests;
         std::function<void(uint32_t)> fun, kill_client;
+		static const int BF = 1024;
+        char buf[BF];
+        int bpos;
     };
 
     epoll &epfd;

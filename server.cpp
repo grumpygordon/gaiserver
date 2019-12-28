@@ -58,13 +58,13 @@ server::client::client(int socket, epoll &epfd, server *parent) :
         is_waiting(false),
         timer_fd(TIMEOUT, ts),
         is_queued(false),
+        bpos(0),
         kill_client([this, parent](uint32_t events) {
 			std::cerr << "KILLED\n";
 			parent->map.erase(this);
 		}),
         fun([this, parent](uint32_t events) {
-            char buf[1024];
-            int rc = recv(fd.get_fd(), buf, sizeof(buf), 0);
+            int rc = recv(fd.get_fd(), buf + bpos, BF - bpos, 0);
 			if ((events & EPOLLRDHUP) || (events & EPOLLERR) || (events & EPOLLHUP)) {
 				std::cerr << "KILLED FROM FUN\n";
 				parent->map.erase(this);
@@ -74,11 +74,23 @@ server::client::client(int socket, epoll &epfd, server *parent) :
 				std::cerr << "Could not get information by socket " << fd.get_fd() << '\n';
 				return;
 			}
-			if (rc < 2 || buf[rc - 2] != '\r' || buf[rc - 1] != '\n')
-				return;
-            std::string request(buf, rc - 2);
-            std::unique_lock<std::mutex> lg(m);
-            client_requests.push(request);
+			int to = bpos + rc;
+			bpos = std::max(0, bpos - 1);
+			while (bpos + 1 < to) {
+				if (buf[bpos] == '\r' && buf[bpos + 1] == '\n') {					
+					std::string request(buf, buf + bpos);
+					bpos += 2;
+					for (int i = bpos; i < to; i++)
+						buf[i - bpos] = buf[i];
+					to = to - bpos;
+					bpos = 0;
+					std::unique_lock<std::mutex> lg(m);
+					client_requests.push(request);
+				} else {
+					bpos++;
+				}
+			}
+			bpos = to;
             if (!is_queued) {
                 is_queued = true;
                 delete_timer();
