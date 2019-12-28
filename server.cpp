@@ -21,19 +21,19 @@ server::server(uint16_t port, epoll &e) : epfd(e),
 												   map.emplace(ptr.get(), std::move(ptr));
                                                }) {
     if (server_socket.get_fd() == -1) {
-        throw std::runtime_error("Could not create a socket, the server with port " + std::to_string(port) + " wasn't created");
+        throw std::runtime_error("Failed to create socket for server at port " + std::to_string(port));
     }
     sockaddr_in server_address{};
     server_address.sin_port = htons(port);
     server_address.sin_addr.s_addr = 0;
     server_address.sin_family = AF_INET;
-    for (;;) {
+    while (true) {
         int res = bind(server_socket.get_fd(), reinterpret_cast<sockaddr const *>(&server_address), sizeof(server_address));
         if (res != 0) {
             port++;
             server_address.sin_port = htons(port);
         } else {
-            std::cout << "OK, the server has port " << port << std::endl;
+            std::cout << "OK, port " << port << std::endl;
             break;
         }
     }
@@ -65,15 +65,17 @@ server::client::client(int socket, epoll &epfd, server *parent) :
         fun([this, parent](uint32_t events) {
             char buf[1024];
             int rc = recv(fd.get_fd(), buf, sizeof(buf), 0);
-			if (rc == 0) {
+			if ((events & EPOLLRDHUP) || (events & EPOLLERR) || (events & EPOLLHUP)) {
 				std::cerr << "KILLED FROM FUN\n";
 				parent->map.erase(this);
 				return;
 			}
 			if (rc < 0) {
-				std::cout << "Could not get information by socket " << fd.get_fd();
+				std::cerr << "Could not get information by socket " << fd.get_fd() << '\n';
 				return;
 			}
+			if (rc < 2 || buf[rc - 2] != '\r' || buf[rc - 1] != '\n')
+				return;
             std::string request(buf, rc - 2);
             std::unique_lock<std::mutex> lg(m);
             client_requests.push(request);
@@ -82,7 +84,7 @@ server::client::client(int socket, epoll &epfd, server *parent) :
                 delete_timer();
                 std::thread th([this] {
                     pid.emplace(getpid());
-                    for (;;) {
+                    while (true) {
                         std::unique_lock<std::mutex> lg(m);
                         if (client_requests.empty()) {
                             is_queued = false;
@@ -97,9 +99,8 @@ server::client::client(int socket, epoll &epfd, server *parent) :
                             for (std::string &str : ans) {
                                 int status = send(fd.get_fd(), str.c_str(),
                                                   str.length(), 0);
-                                if (status < 0) {
-                                    std::cerr << "Could not send information to socket " << fd.get_fd() << std::endl;
-                                }
+                                if (status < 0)
+                                    std::cerr << "Failed to send to " << fd.get_fd() << '\n';
                             }
                         }
                     }
@@ -128,9 +129,8 @@ bool server::client::operator==(const struct server::client &rhs) {
 
 void server::client::set_timer() {
     int status = timerfd_settime(timer_fd.get_fd(), 0, &ts, nullptr);
-    if (status != 0) {
-        std::cout << "Could not set timer" << std::endl;
-    }
+    if (status != 0)
+        std::cout << "Failed to set timer" << '\n';
     is_waiting = true;
     epfd.add_event(timer_fd.get_fd(), &kill_client);
 }
@@ -146,9 +146,8 @@ std::vector<std::string> server::handle(const std::string &request) {
     addrinfo hints{};
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
-    //hints.ai_flags = AI_PASSIVE;
     addrinfo *server_info = 0;
-    int status = getaddrinfo(request.c_str(), "80", &hints, &server_info);
+    int status = getaddrinfo(request.c_str(), "http", &hints, &server_info);
     if (status != 0) {
 		freeaddrinfo(server_info);
 		if (status == -2)
@@ -156,7 +155,7 @@ std::vector<std::string> server::handle(const std::string &request) {
         return {"Couldn't get info for " + request + ", error is " + std::to_string(status)};
     }
     std::vector<std::string> ans;
-    ans.emplace_back("The IP addresses for " + request + '\n');
+    ans.emplace_back("IPs for " + request + '\n');
     for (auto p = server_info; p != nullptr; p = p->ai_next) {
 		std::string address(inet_ntoa(reinterpret_cast<sockaddr_in *>(p->ai_addr)->sin_addr));
         address.push_back('\n');

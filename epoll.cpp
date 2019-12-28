@@ -21,12 +21,11 @@ epoll::~epoll() {
 
 void epoll::add_event(int socket, std::function<void(uint32_t)> *ptr) {
     epoll_event ev{};
-    ev.events = EPOLLIN;
+    ev.events = EPOLLIN | EPOLLRDHUP;
     ev.data.ptr = ptr;
     int status = epoll_ctl(fd, EPOLL_CTL_ADD, socket, &ev);
-    if (status != 0) {
-        std::cout << "Could not add event with socket " << socket << std::endl;
-    }
+    if (status != 0)
+        std::cout << "Could not add event with socket " << socket << '\n';
 }
 
 void epoll::delete_event(int socket) {
@@ -43,7 +42,7 @@ void epoll::execute() {
     }
     signal_fd = signalfd(-1, &mask, 0);
     if (signal_fd == -1) {
-        throw std::runtime_error("Could not create a signal");
+        throw std::runtime_error("Failed to create signalfd");
     }
 	std::function<void(uint32_t)> fn = [this](uint32_t events) {
 		stop = 1;
@@ -56,7 +55,7 @@ void epoll::execute() {
         epoll_event events[K];
         int n = epoll_wait(fd, events, K, TIMEOUT);
         if (n < 0) {
-            std::cout << "Could not get current events from epoll, the error is " + std::to_string(n) << std::endl;
+            std::cout << "Wait failed, error " + std::to_string(n) << std::endl;
         }
         for (int i = 0; i < n; i++) {
 			auto *ptr = reinterpret_cast<std::function<void(uint32_t)> *>(events[i].data.ptr);
