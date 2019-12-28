@@ -12,6 +12,7 @@
 #include <iostream>
 #include <csignal>
 #include "zconf.h"
+#include <cassert>
 
 server::server(uint16_t port, epoll &e) : epfd(e),
                                                port(port),
@@ -59,80 +60,110 @@ server::client::client(int socket, epoll &epfd, server *parent) :
         timer_fd(TIMEOUT, ts),
         is_queued(false),
         bpos(0),
+        fin{false},
+        client_requests{},
+        answers{},
+        cv{},
+        t([this]() {
+			while (true) {
+				std::unique_lock<std::mutex> lg(m);
+				cv.wait(lg, [this]() {
+					std::cerr << "zashel\n";
+					return fin || !client_requests.empty();
+					return !client_requests.empty();
+				});
+				std::cerr << "YA TUT CV\n";
+				if (fin)
+					break;
+				if (!is_queued) {
+					is_queued = true;
+					delete_timer();
+				}
+				while (!client_requests.empty()) {
+					std::string request = client_requests.front();
+					std::cerr << "LOL\n";
+					client_requests.pop();
+					std::vector<std::string> ans = handle(request);
+					for (auto &i : ans)
+						answers.push(i);
+				}
+				if (answers.empty() && client_requests.empty()) {
+					is_queued = false;
+					set_timer();
+				}
+				std::cerr << "CV DONE\n";
+			}
+		}),
         kill_client([this, parent](uint32_t events) {
 			std::cerr << "KILLED\n";
 			parent->map.erase(this);
 		}),
         fun([this, parent](uint32_t events) {
-            int rc = recv(fd.get_fd(), buf + bpos, BF - bpos, 0);
 			if ((events & EPOLLRDHUP) || (events & EPOLLERR) || (events & EPOLLHUP)) {
 				std::cerr << "KILLED FROM FUN\n";
 				parent->map.erase(this);
 				return;
 			}
+            int rc = recv(fd.get_fd(), buf + bpos, BF - bpos, 0);
 			if (rc < 0) {
 				std::cerr << "Could not get information by socket " << fd.get_fd() << '\n';
-				return;
+			} else {
+				std::cerr << "AFTER READ\n";
+				int to = bpos + rc;
+				bpos = std::max(0, bpos - 1);
+				while (bpos + 1 < to) {
+					if (buf[bpos] == '\r' && buf[bpos + 1] == '\n') {					
+						std::string request(buf, buf + bpos);
+						bpos += 2;
+						for (int i = bpos; i < to; i++)
+							buf[i - bpos] = buf[i];
+						to = to - bpos;
+						bpos = 0;
+						{
+							std::unique_lock<std::mutex> lg(m);
+							std::cerr << "PUSH\n";
+							client_requests.push(request);
+							cv.notify_all();
+						}
+					} else {
+						bpos++;
+					}
+				}
+				bpos = to;
 			}
-			int to = bpos + rc;
-			bpos = std::max(0, bpos - 1);
-			while (bpos + 1 < to) {
-				if (buf[bpos] == '\r' && buf[bpos + 1] == '\n') {					
-					std::string request(buf, buf + bpos);
-					bpos += 2;
-					for (int i = bpos; i < to; i++)
-						buf[i - bpos] = buf[i];
-					to = to - bpos;
-					bpos = 0;
-					std::unique_lock<std::mutex> lg(m);
-					client_requests.push(request);
-				} else {
-					bpos++;
+			{
+				std::unique_lock<std::mutex> lg(m);
+					std::cerr << "YA TUT FUN\n";
+				while (!answers.empty()) {
+					std::cerr << "HAS SOME\n";
+					std::string &str = answers.front();
+					int status = send(fd.get_fd(), str.c_str(),
+									  str.length(), 0);
+					if (status < 0)
+						std::cerr << "Failed to send to " << fd.get_fd() << '\n';
+					else if (status < str.length())
+						answers.front() = answers.front().substr(status);
+					else
+						answers.pop();
 				}
 			}
-			bpos = to;
-            if (!is_queued) {
-                is_queued = true;
-                delete_timer();
-                std::thread th([this] {
-                    pid.emplace(getpid());
-                    while (true) {
-                        std::unique_lock<std::mutex> lg(m);
-                        if (client_requests.empty()) {
-                            is_queued = false;
-                            pid.reset();
-                            set_timer();
-                            break;
-                        } else {
-                            std::string request = client_requests.front();
-                            client_requests.pop();
-                            lg.unlock();
-                            std::vector<std::string> ans = handle(request);
-                            for (std::string &str : ans) {
-                                int status = send(fd.get_fd(), str.c_str(),
-                                                  str.length(), 0);
-                                if (status < 0)
-                                    std::cerr << "Failed to send to " << fd.get_fd() << '\n';
-                            }
-                        }
-                    }
-                });
-                th.detach();
-            }
         }) {
-    epfd.add_event(fd.get_fd(), &fun);
+	std::cerr << "SNACAHALA TYT\n";
+	epfd.add_event(fd.get_fd(), &fun);
     set_timer();
 }
 
 server::client::~client() {
-    if (fd.get_fd() != -1) {
+	{
+		std::unique_lock<std::mutex> lg(m);
+		fin = 1;
+	}
+	std::cerr << "DESTR\n";
+	cv.notify_all();
+	t.join();
+    if (fd.get_fd() != -1)
         this->epfd.delete_event(fd.get_fd());
-    }
     delete_timer();
-    std::unique_lock<std::mutex> lg(m);
-    if (pid.has_value()) {
-        kill(pid.value(), SIGTERM);
-    }
 }
 
 bool server::client::operator==(const struct server::client &rhs) {

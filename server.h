@@ -9,6 +9,8 @@
 #include <vector>
 #include <unordered_map>
 #include <mutex>
+#include <atomic>
+#include <condition_variable>
 #include <memory>
 #include <condition_variable>
 #include <thread>
@@ -38,10 +40,12 @@ private:
         bool is_waiting;
         mysocket timer_fd;
 
-        bool is_queued;
+        bool is_queued, fin;
         std::optional<pid_t> pid;
         std::mutex m;
-        std::queue<std::string> client_requests;
+        std::thread t;
+        std::condition_variable cv;
+        std::queue<std::string> client_requests, answers;
         std::function<void(uint32_t)> fun, kill_client;
 		static const int BF = 1024;
         char buf[BF];
