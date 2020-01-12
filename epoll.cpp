@@ -57,7 +57,7 @@ void epoll::execute() {
     }
 	std::function<void(uint32_t)> fn = [this](uint32_t events) {
 		stop = 1;
-		std::cerr << "\nStopped signal\n";
+		std::cerr << "\nStop signal\n";
 	};
 	add_event(signal_fd, &fn);
     while (!stop) {
@@ -68,7 +68,7 @@ void epoll::execute() {
         if (n < 0) {
             std::cout << "Wait failed, error " + std::to_string(n) << std::endl;
         }
-        std::cerr << "looping " << n << "\n";
+        //std::cerr << "looping " << n << "\n";
         for (int i = 0; i < n; i++) {
 			auto *ptr = reinterpret_cast<std::function<void(uint32_t)> *>(events[i].data.ptr);
 			(*ptr)(events[i].events);

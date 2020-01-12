@@ -40,7 +40,7 @@ private:
         itimerspec ts;
         mysocket timer_fd;
 
-        std::atomic_bool writable, updated, fin;
+        std::atomic_bool updated, fin;
         bool has_timer, failed = 0, out = 0;
         std::mutex m;
         std::thread t;

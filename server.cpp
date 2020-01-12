@@ -9,9 +9,6 @@
 #include <arpa/inet.h>
 #include <thread>
 #include <iostream>
-#include <csignal>
-#include "zconf.h"
-#include <cassert>
 
 server::server(uint16_t port, epoll &e) : epfd(e),
                                                port(port),
@@ -59,46 +56,19 @@ server::client::client(int socket, epoll &epfd, server *parent) :
         timer_fd(TIMEOUT, ts),
         updated{false},
         bpos(0),
-        writable{false},
         fin{false},
         has_timer(false),
         client_requests{},
         answers{},
         cv{},
         t([this]() {
-            auto write = [this]() {
-                std::cerr << "ENTERED OUT\n";
-                if (!writable)
-                    return;
-                std::cerr << "WRITABLE\n";
-                while (!answers.empty()) {
-                    std::cerr << "HAS SOME\n";
-                    std::string &str = answers.front();
-                    int status = send(fd.get_fd(), str.c_str(),
-                                      str.length(), 0);
-                    if (status > 0)
-                        delete_timer();
-                    if (status < str.length()) {
-                        if (status > 0)
-                            answers.front() = answers.front().substr(status);
-                        else
-                            std::cerr << "Failed to send to " << fd.get_fd() << '\n';
-                        writable = false;
-                        break;
-                    } else {
-                        answers.pop();
-                    }
-                }
-                set_timer();
-            };
 			while (true) {
                 std::unique_lock<std::mutex> lg(m);
                 cv.wait(lg, [this]() {
-                    return updated || fin || (writable && !answers.empty());
+                    return updated || fin;
                 });
                 if (fin)
                     break;
-                write();
                 while (!client_requests.empty()) {
                     std::string task = client_requests.front();
                     delete_timer();
@@ -106,31 +76,30 @@ server::client::client(int socket, epoll &epfd, server *parent) :
                     for (auto &i : ans)
                         answers.push(i);
                     client_requests.pop();
-                    write();
                 }
                 set_timer();
                 updated = false;
-                std::cerr << "FINISHED CALC\n";
+                //std::cerr << "FINISHED CALC\n";
 			}
 		}),
         kill_client([this, parent](uint32_t events) {
-			std::cerr << "KILLED FROM TIMER\n";
+			//std::cerr << "KILLED FROM TIMER\n";
 			parent->map.erase(this);
 		}),
         fun([this, parent](uint32_t events) {
 			if ((events & EPOLLRDHUP) || (events & EPOLLERR) || (events & EPOLLHUP) || fin) {
-				std::cerr << "KILLED FROM FUN\n";
+				//std::cerr << "KILLED FROM FUN\n";
 				parent->map.erase(this);
 				return;
 			}
 			if (events & EPOLLIN) {
                 int rc = recv(fd.get_fd(), buf + bpos, BF - bpos, 0);
                 if (rc == 0) {
-                    fin = 1;
+                    fin = true;
                 } else if (rc < 0) {
                     std::cerr << "Could not get information from socket " << fd.get_fd() << '\n';
                 } else {
-                    std::cerr << "AFTER READ\n";
+                    //std::cerr << "AFTER READ\n";
                     int to = bpos + rc;
                     bpos = std::max(0, bpos - 1);
                     while (bpos + 1 < to) {
@@ -143,7 +112,6 @@ server::client::client(int socket, epoll &epfd, server *parent) :
                             bpos = 0;
                             {
                                 std::unique_lock<std::mutex> lg(m);
-                                std::cerr << "PUSH\n";
                                 client_requests.push(request);
                                 updated = true;
                             }
@@ -153,32 +121,52 @@ server::client::client(int socket, epoll &epfd, server *parent) :
                     }
                     bpos = to;
                 }
-            }
-            writable = (events & EPOLLOUT) != 0;
-            if (EPOLLOUT & events)
-                std::cerr << "HAS OUT\n";
+                if (bpos == BF)
+                    fin = true;
+			}
             cv.notify_all();
-            {
+            if (EPOLLOUT & events) {
+                //std::cerr << "HAS OUT\n";
                 std::unique_lock<std::mutex> lg(m);
-                bool new_out = (!answers.empty() || !client_requests.empty());
-                if (new_out != out) {
-                    out = new_out;
-                    if (!this->epfd.mod_event(fd.get_fd(), out, &fun))
-                        fin = true;
+                while (!answers.empty()) {
+                    //std::cerr << "HAS SOME\n";
+                    std::string &str = answers.front();
+                    int status = send(fd.get_fd(), str.c_str(),
+                                      str.length(), 0);
+                    if (status > 0)
+                        delete_timer();
+                    if (status < str.length()) {
+                        if (status > 0)
+                            answers.front() = answers.front().substr(status);
+                        else
+                            std::cerr << "Failed to send to " << fd.get_fd() << '\n';
+                        break;
+                    } else {
+                        answers.pop();
+                    }
                 }
+                set_timer();
+            }
+            std::unique_lock<std::mutex> lg(m);
+            bool new_out = (!answers.empty() || !client_requests.empty());
+            if (new_out != out) {
+                out = new_out;
+                if (!this->epfd.mod_event(fd.get_fd(), out, &fun))
+                    fin = true;
             }
         }) {
-	std::cerr << "CREATING CLIENT\n";
+	//std::cerr << "CREATING CLIENT\n";
 	if (!epfd.add_event(fd.get_fd(),&fun)) {
 	    failed = true;
 	    return;
 	}
+	std::unique_lock<std::mutex> lg(m);
     set_timer();
 }
 
 server::client::~client() {
     fin = 1;
-	std::cerr << "DELETING CLIENT\n";
+	//std::cerr << "DELETING CLIENT\n";
 	cv.notify_all();
 	t.join();
     if (fd.get_fd() != -1)
