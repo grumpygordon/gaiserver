@@ -18,7 +18,8 @@ server::server(uint16_t port, epoll &e) : epfd(e),
                                                server_socket(),
                                                add_new_socket([this](uint32_t) {
 												   std::unique_ptr<client> ptr(new client(server_socket.get_fd(), epfd, this));
-												   map.emplace(ptr.get(), std::move(ptr));
+												   if (!ptr->failed)
+												        map.emplace(ptr.get(), std::move(ptr));
                                                }) {
     if (server_socket.get_fd() == -1) {
         throw std::runtime_error("Failed to create socket for server at port " + std::to_string(port));
@@ -100,11 +101,11 @@ server::client::client(int socket, epoll &epfd, server *parent) :
                 write();
                 while (!client_requests.empty()) {
                     std::string task = client_requests.front();
-                    client_requests.pop();
                     delete_timer();
                     std::vector<std::string> ans = handle(task);
                     for (auto &i : ans)
                         answers.push(i);
+                    client_requests.pop();
                     write();
                 }
                 set_timer();
@@ -124,7 +125,9 @@ server::client::client(int socket, epoll &epfd, server *parent) :
 			}
 			if (events & EPOLLIN) {
                 int rc = recv(fd.get_fd(), buf + bpos, BF - bpos, 0);
-                if (rc <= 0) {
+                if (rc == 0) {
+                    fin = 1;
+                } else if (rc < 0) {
                     std::cerr << "Could not get information from socket " << fd.get_fd() << '\n';
                 } else {
                     std::cerr << "AFTER READ\n";
@@ -151,20 +154,31 @@ server::client::client(int socket, epoll &epfd, server *parent) :
                     bpos = to;
                 }
             }
-            writable = (events & (EPOLLWAKEUP | EPOLLOUT));
+            writable = (events & EPOLLOUT) != 0;
+            if (EPOLLOUT & events)
+                std::cerr << "HAS OUT\n";
             cv.notify_all();
+            {
+                std::unique_lock<std::mutex> lg(m);
+                bool new_out = (!answers.empty() || !client_requests.empty());
+                if (new_out != out) {
+                    out = new_out;
+                    if (!this->epfd.mod_event(fd.get_fd(), out, &fun))
+                        fin = true;
+                }
+            }
         }) {
-	std::cerr << "SNACAHALA TYT\n";
-	epfd.add_event(fd.get_fd(), &fun);
+	std::cerr << "CREATING CLIENT\n";
+	if (!epfd.add_event(fd.get_fd(),&fun)) {
+	    failed = true;
+	    return;
+	}
     set_timer();
 }
 
 server::client::~client() {
-	{
-		std::unique_lock<std::mutex> lg(m);
-		fin = 1;
-	}
-	std::cerr << "DESTR\n";
+    fin = 1;
+	std::cerr << "DELETING CLIENT\n";
 	cv.notify_all();
 	t.join();
     if (fd.get_fd() != -1)
@@ -181,10 +195,10 @@ void server::client::set_timer() {
         int status = timerfd_settime(timer_fd.get_fd(), 0, &ts, nullptr);
         if (status != 0) {
             std::cout << "Failed to set timer" << '\n';
-            fin = 1;
+            fin = true;
         } else {
             has_timer = true;
-            epfd.add_event(timer_fd.get_fd(), std::move(&kill_client));
+            epfd.add_event(timer_fd.get_fd(),&kill_client);
         }
     }
 }
@@ -206,7 +220,7 @@ std::vector<std::string> server::handle(const std::string &request) {
 		freeaddrinfo(server_info);
 		if (status == -2)
             return {"Incorrect address of website " + request + '\n'};
-        return {"Couldn't get info for " + request + ", error is " + std::to_string(status)};
+        return {"Couldn't get info for " + request + ", error is " + std::to_string(status) + '\n'};
     }
     std::vector<std::string> ans;
     ans.emplace_back("IPs for " + request + '\n');

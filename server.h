@@ -41,7 +41,7 @@ private:
         mysocket timer_fd;
 
         std::atomic_bool writable, updated, fin;
-        bool has_timer;
+        bool has_timer, failed = 0, out = 0;
         std::mutex m;
         std::thread t;
         std::condition_variable cv;

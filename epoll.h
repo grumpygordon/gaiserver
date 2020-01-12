@@ -9,7 +9,11 @@ struct epoll {
 
     ~epoll();
 
-    void add_event(int socket, std::function<void(uint32_t)> *ptr);
+    bool add_event(int socket, std::function<void(uint32_t)> *ptr);
+
+    bool control(int socket, int op, uint32_t evs, std::function<void(uint32_t)> *ptr);
+
+    bool mod_event(int socket, bool out, std::function<void(uint32_t)> *ptr);
 
     void delete_event(int socket);
 
