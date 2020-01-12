@@ -14,6 +14,7 @@
 #include <memory>
 #include <condition_variable>
 #include <thread>
+#include <atomic>
 
 struct server {
     explicit server(uint16_t port, epoll &e);
@@ -35,13 +36,12 @@ private:
         epoll &epfd;
         mysocket fd;
 
-        int const TIMEOUT = 50;
+        const int TIMEOUT = 50;
         itimerspec ts;
-        bool is_waiting;
         mysocket timer_fd;
 
-        bool is_queued, fin;
-        std::optional<pid_t> pid;
+        std::atomic_bool writable, updated, fin;
+        bool has_timer;
         std::mutex m;
         std::thread t;
         std::condition_variable cv;

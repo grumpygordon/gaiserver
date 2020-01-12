@@ -8,7 +8,6 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <thread>
-#include <cstring>
 #include <iostream>
 #include <csignal>
 #include "zconf.h"
@@ -56,97 +55,104 @@ server::client::client(int socket, epoll &epfd, server *parent) :
         epfd(epfd),
         fd(socket),
         ts(),
-        is_waiting(false),
         timer_fd(TIMEOUT, ts),
-        is_queued(false),
+        updated{false},
         bpos(0),
+        writable{false},
         fin{false},
+        has_timer(false),
         client_requests{},
         answers{},
         cv{},
         t([this]() {
+            auto write = [this]() {
+                std::cerr << "ENTERED OUT\n";
+                if (!writable)
+                    return;
+                std::cerr << "WRITABLE\n";
+                while (!answers.empty()) {
+                    std::cerr << "HAS SOME\n";
+                    std::string &str = answers.front();
+                    int status = send(fd.get_fd(), str.c_str(),
+                                      str.length(), 0);
+                    if (status > 0)
+                        delete_timer();
+                    if (status < str.length()) {
+                        if (status > 0)
+                            answers.front() = answers.front().substr(status);
+                        else
+                            std::cerr << "Failed to send to " << fd.get_fd() << '\n';
+                        writable = false;
+                        break;
+                    } else {
+                        answers.pop();
+                    }
+                }
+                set_timer();
+            };
 			while (true) {
-				std::unique_lock<std::mutex> lg(m);
-				cv.wait(lg, [this]() {
-					std::cerr << "zashel\n";
-					return fin || !client_requests.empty();
-					return !client_requests.empty();
-				});
-				std::cerr << "YA TUT CV\n";
-				if (fin)
-					break;
-				if (!is_queued) {
-					is_queued = true;
-					delete_timer();
-				}
-				while (!client_requests.empty()) {
-					std::string request = client_requests.front();
-					std::cerr << "LOL\n";
-					client_requests.pop();
-					std::vector<std::string> ans = handle(request);
-					for (auto &i : ans)
-						answers.push(i);
-				}
-				if (answers.empty() && client_requests.empty()) {
-					is_queued = false;
-					set_timer();
-				}
-				std::cerr << "CV DONE\n";
+                std::unique_lock<std::mutex> lg(m);
+                cv.wait(lg, [this]() {
+                    return updated || fin || (writable && !answers.empty());
+                });
+                if (fin)
+                    break;
+                write();
+                while (!client_requests.empty()) {
+                    std::string task = client_requests.front();
+                    client_requests.pop();
+                    delete_timer();
+                    std::vector<std::string> ans = handle(task);
+                    for (auto &i : ans)
+                        answers.push(i);
+                    write();
+                }
+                set_timer();
+                updated = false;
+                std::cerr << "FINISHED CALC\n";
 			}
 		}),
         kill_client([this, parent](uint32_t events) {
-			std::cerr << "KILLED\n";
+			std::cerr << "KILLED FROM TIMER\n";
 			parent->map.erase(this);
 		}),
         fun([this, parent](uint32_t events) {
-			if ((events & EPOLLRDHUP) || (events & EPOLLERR) || (events & EPOLLHUP)) {
+			if ((events & EPOLLRDHUP) || (events & EPOLLERR) || (events & EPOLLHUP) || fin) {
 				std::cerr << "KILLED FROM FUN\n";
 				parent->map.erase(this);
 				return;
 			}
-            int rc = recv(fd.get_fd(), buf + bpos, BF - bpos, 0);
-			if (rc < 0) {
-				std::cerr << "Could not get information by socket " << fd.get_fd() << '\n';
-			} else {
-				std::cerr << "AFTER READ\n";
-				int to = bpos + rc;
-				bpos = std::max(0, bpos - 1);
-				while (bpos + 1 < to) {
-					if (buf[bpos] == '\r' && buf[bpos + 1] == '\n') {					
-						std::string request(buf, buf + bpos);
-						bpos += 2;
-						for (int i = bpos; i < to; i++)
-							buf[i - bpos] = buf[i];
-						to = to - bpos;
-						bpos = 0;
-						{
-							std::unique_lock<std::mutex> lg(m);
-							std::cerr << "PUSH\n";
-							client_requests.push(request);
-							cv.notify_all();
-						}
-					} else {
-						bpos++;
-					}
-				}
-				bpos = to;
-			}
-			{
-				std::unique_lock<std::mutex> lg(m);
-					std::cerr << "YA TUT FUN\n";
-				while (!answers.empty()) {
-					std::cerr << "HAS SOME\n";
-					std::string &str = answers.front();
-					int status = send(fd.get_fd(), str.c_str(),
-									  str.length(), 0);
-					if (status < 0)
-						std::cerr << "Failed to send to " << fd.get_fd() << '\n';
-					else if (status < str.length())
-						answers.front() = answers.front().substr(status);
-					else
-						answers.pop();
-				}
-			}
+			if (events & EPOLLIN) {
+                int rc = recv(fd.get_fd(), buf + bpos, BF - bpos, 0);
+                if (rc <= 0) {
+                    std::cerr << "Could not get information from socket " << fd.get_fd() << '\n';
+                } else {
+                    std::cerr << "AFTER READ\n";
+                    int to = bpos + rc;
+                    bpos = std::max(0, bpos - 1);
+                    while (bpos + 1 < to) {
+                        if (buf[bpos] == '\r' && buf[bpos + 1] == '\n') {
+                            std::string request(buf, buf + bpos);
+                            bpos += 2;
+                            for (int i = bpos; i < to; i++)
+                                buf[i - bpos] = buf[i];
+                            to = to - bpos;
+                            bpos = 0;
+                            {
+                                std::unique_lock<std::mutex> lg(m);
+                                std::cerr << "PUSH\n";
+                                client_requests.push(request);
+                                updated = true;
+                            }
+                        } else {
+                            bpos++;
+                        }
+                    }
+                    bpos = to;
+                }
+            }
+            writable = (events & (EPOLLWAKEUP | EPOLLOUT));
+            cv.notify_all();
         }) {
 	std::cerr << "SNACAHALA TYT\n";
 	epfd.add_event(fd.get_fd(), &fun);
@@ -171,18 +177,23 @@ bool server::client::operator==(const struct server::client &rhs) {
 }
 
 void server::client::set_timer() {
-    int status = timerfd_settime(timer_fd.get_fd(), 0, &ts, nullptr);
-    if (status != 0)
-        std::cout << "Failed to set timer" << '\n';
-    is_waiting = true;
-    epfd.add_event(timer_fd.get_fd(), &kill_client);
+    if (!has_timer) {
+        int status = timerfd_settime(timer_fd.get_fd(), 0, &ts, nullptr);
+        if (status != 0) {
+            std::cout << "Failed to set timer" << '\n';
+            fin = 1;
+        } else {
+            has_timer = true;
+            epfd.add_event(timer_fd.get_fd(), std::move(&kill_client));
+        }
+    }
 }
 
 void server::client::delete_timer() {
-    if (is_waiting) {
+    if (has_timer) {
         epfd.delete_event(timer_fd.get_fd());
+        has_timer = false;
     }
-    is_waiting = false;
 }
 
 std::vector<std::string> server::handle(const std::string &request) {

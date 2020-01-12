@@ -21,7 +21,7 @@ epoll::~epoll() {
 
 void epoll::add_event(int socket, std::function<void(uint32_t)> *ptr) {
     epoll_event ev{};
-    ev.events = EPOLLIN | EPOLLRDHUP;
+    ev.events = EPOLLIN | EPOLLRDHUP | EPOLLOUT | EPOLLWAKEUP;
     ev.data.ptr = ptr;
     int status = epoll_ctl(fd, EPOLL_CTL_ADD, socket, &ev);
     if (status != 0)
@@ -51,7 +51,7 @@ void epoll::execute() {
 	add_event(signal_fd, &fn);
     while (!stop) {
         const size_t K = 32;
-        const size_t TIMEOUT = 60 * 1000;
+        const size_t TIMEOUT = 1 * 1000;
         epoll_event events[K];
         int n = epoll_wait(fd, events, K, TIMEOUT);
         if (n < 0) {
